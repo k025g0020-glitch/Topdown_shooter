@@ -1,6 +1,6 @@
 #pragma once
-#include "KamataEngine.h"
 #include "CollisionMapInfo.h"
+#include "KamataEngine.h"
 #include "PlayerBullet.h"
 #include <cassert>
 #include <list>
@@ -50,6 +50,12 @@ private:
 
 	// 攻撃（弾の発射）
 	void Attack();
+
+	// マウスカーソルの方向を狙う
+	void Aim();
+
+	// マウスカーソルが指している地面（自キャラと同じ高さの平面）上の座標を求める
+	bool GetMouseWorldPosition(KamataEngine::Vector3& outPosition) const;
 
 	// 進行方向へ向きを補間する
 	void Turn();
@@ -103,6 +109,8 @@ private:
 	// 弾
 	KamataEngine::Model* modelBullet_ = nullptr;
 	std::list<PlayerBullet*> bullets_;
+	// 狙っている方向（XZ平面の単位ベクトル）
+	KamataEngine::Vector3 aimDirection_ = {0.0f, 0.0f, 1.0f};
 	// 弾の速さ
 	static inline const float kBulletSpeed = 0.5f;
 	// 発射間隔<フレーム>

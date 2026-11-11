@@ -46,6 +46,9 @@ void Player::Update() {
 	// 判定結果を反映して移動させる
 	ApplyMove(collisionMapInfo);
 
+	// マウスカーソルの方向を狙う（向きもカーソル方向になる）
+	Aim();
+
 	// 旋回制御
 	Turn();
 
@@ -75,18 +78,71 @@ void Player::Attack() {
 		--fireTimer_;
 	}
 
-	// SPACE を押している間、一定間隔で連射
-	if (!Input::GetInstance()->PushKey(DIK_SPACE) || fireTimer_ > 0 || !modelBullet_) {
+	// 左クリック または SPACE を押している間、一定間隔で連射
+	Input* input = Input::GetInstance();
+	bool isFirePressed = input->IsPressMouse(0) || input->PushKey(DIK_SPACE);
+	if (!isFirePressed || fireTimer_ > 0 || !modelBullet_) {
 		return;
 	}
 	fireTimer_ = kFireInterval;
 
-	// 向いている方向（入力方向）に飛ばす。モデルの正面は +Z
-	Vector3 velocity = {std::sin(targetRotationY_) * kBulletSpeed, 0.0f, std::cos(targetRotationY_) * kBulletSpeed};
+	// マウスカーソルの方向に飛ばす
+	Vector3 velocity = calc::Multiply(kBulletSpeed, aimDirection_);
 
 	PlayerBullet* newBullet = new PlayerBullet();
 	newBullet->Initialize(modelBullet_, camera_, mapChipField_, worldTransform_.translation_, velocity);
 	bullets_.push_back(newBullet);
+}
+
+void Player::Aim() {
+	Vector3 mouseWorldPosition;
+	if (!GetMouseWorldPosition(mouseWorldPosition)) {
+		return;
+	}
+
+	// 自キャラからカーソル位置へのベクトル（XZ平面）
+	Vector3 toMouse = calc::Subtract(mouseWorldPosition, worldTransform_.translation_);
+	toMouse.y = 0.0f;
+
+	// カーソルが自キャラにほぼ重なっているときは方向を更新しない
+	if (calc::Length(toMouse) < 0.01f) {
+		return;
+	}
+	aimDirection_ = calc::Normalize(toMouse);
+
+	// カーソル方向を向く（モデルの正面は +Z）
+	targetRotationY_ = std::atan2(aimDirection_.x, aimDirection_.z);
+}
+
+bool Player::GetMouseWorldPosition(Vector3& outPosition) const {
+	// マウス座標（クライアント座標, ピクセル）
+	const Vector2& mousePosition = Input::GetInstance()->GetMousePosition();
+
+	// スクリーン座標 → 正規化デバイス座標（-1～+1, Yは上が+）
+	float ndcX = mousePosition.x / static_cast<float>(WinApp::kWindowWidth) * 2.0f - 1.0f;
+	float ndcY = 1.0f - mousePosition.y / static_cast<float>(WinApp::kWindowHeight) * 2.0f;
+
+	// ビュープロジェクション行列の逆行列で、NDC → ワールド座標に戻す
+	Matrix4x4 matViewProjection = calc::Multiply(camera_->matView, camera_->matProjection);
+	Matrix4x4 matInverseVP = calc::Inverse(matViewProjection);
+
+	// 近クリップ面(z=0)と遠クリップ面(z=1)上の点を求め、カーソルを通るレイを作る
+	Vector3 posNear = calc::Transform({ndcX, ndcY, 0.0f}, matInverseVP);
+	Vector3 posFar = calc::Transform({ndcX, ndcY, 1.0f}, matInverseVP);
+	Vector3 rayDirection = calc::Subtract(posFar, posNear);
+
+	// レイが地面と平行なら交点なし
+	if (std::abs(rayDirection.y) < 0.0001f) {
+		return false;
+	}
+
+	// レイと平面 y = 自キャラの高さ の交点を求める
+	float t = (worldTransform_.translation_.y - posNear.y) / rayDirection.y;
+	if (t < 0.0f) {
+		return false;
+	}
+	outPosition = calc::Add(posNear, calc::Multiply(t, rayDirection));
+	return true;
 }
 
 Player::~Player() {
@@ -128,8 +184,6 @@ void Player::Move() {
 			velocity_.z *= kLimitRunSpeed / speed;
 		}
 
-		// 入力方向を向く（モデルの正面は +Z）
-		targetRotationY_ = std::atan2(direction.x, direction.z);
 	} else {
 		// 入力がなければ減速
 		velocity_.x *= (1.0f - kAttenuation);
