@@ -58,6 +58,7 @@ private:
 	KamataEngine::Model* modelSkydome_ = nullptr;
 	KamataEngine::Model* modelEnemy_ = nullptr;
 	KamataEngine::Model* modelDeathParticle_ = nullptr;
+	KamataEngine::Model* modelBullet_ = nullptr;
 
 	KamataEngine::Camera camera_;
 

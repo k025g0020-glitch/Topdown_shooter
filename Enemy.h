@@ -24,6 +24,10 @@ public:
 	AABB GetAABB();
 
 	void OnCollision(const Player* player);
+	// 弾に当たったときの処理
+	void OnBulletCollision();
+
+	bool IsDead() const { return isDead_; }
 
 private:
 	// 上から見たときの4つの角（Far = 奥(+Z), Near = 手前(-Z)）
@@ -89,4 +93,6 @@ private:
 	static inline const float kWalkMotionAngleStart = 30.0f;
 	static inline const float kWalkMotionAngleEnd = 30.0f;
 	float walkTimer_ = 0.0f;
+
+	bool isDead_ = false;
 };

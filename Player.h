@@ -1,7 +1,9 @@
 #pragma once
 #include "KamataEngine.h"
 #include "CollisionMapInfo.h"
+#include "PlayerBullet.h"
 #include <cassert>
+#include <list>
 
 class MapChipField;
 
@@ -12,6 +14,13 @@ public:
 	void Initialize(KamataEngine::Model* model, KamataEngine::Camera* camera, MapChipField* mapChipField, const KamataEngine::Vector3& position);
 	void Update();
 	void Draw();
+
+	// 弾のモデルを設定
+	void SetBulletModel(KamataEngine::Model* model) { modelBullet_ = model; }
+	// 弾リストを取得
+	const std::list<PlayerBullet*>& GetBullets() const { return bullets_; }
+
+	~Player();
 
 	const KamataEngine::Vector3& GetTranslation() const { return worldTransform_.translation_; }
 	void SetTranslation(const KamataEngine::Vector3& translation) { worldTransform_.translation_ = translation; }
@@ -38,6 +47,9 @@ private:
 	};
 
 	void Move();
+
+	// 攻撃（弾の発射）
+	void Attack();
 
 	// 進行方向へ向きを補間する
 	void Turn();
@@ -87,4 +99,13 @@ private:
 	static inline const float kAttenuationWall = 0.2f;
 
 	bool isDead_ = false;
+
+	// 弾
+	KamataEngine::Model* modelBullet_ = nullptr;
+	std::list<PlayerBullet*> bullets_;
+	// 弾の速さ
+	static inline const float kBulletSpeed = 0.5f;
+	// 発射間隔<フレーム>
+	static inline const int32_t kFireInterval = 10;
+	int32_t fireTimer_ = 0;
 };

@@ -343,6 +343,11 @@ void Enemy::OnCollision(const Player* player) {
 	(void)player;
 }
 
+void Enemy::OnBulletCollision() {
+	// 弾が当たったら倒される
+	isDead_ = true;
+}
+
 void Enemy::Draw() {
 	model_->Draw(worldTransform_, *camera_);
 }

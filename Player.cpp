@@ -51,6 +51,49 @@ void Player::Update() {
 
 	worldTransform_.matWorld_ = calc::MakeAffineMatrix(worldTransform_.scale_, worldTransform_.rotation_, worldTransform_.translation_);
 	worldTransform_.TransferMatrix();
+
+	// 攻撃
+	Attack();
+
+	// 弾の更新
+	for (PlayerBullet* bullet : bullets_) {
+		bullet->Update();
+	}
+
+	// 寿命が尽きた・壁や敵に当たった弾を削除
+	bullets_.remove_if([](PlayerBullet* bullet) {
+		if (bullet->IsDead()) {
+			delete bullet;
+			return true;
+		}
+		return false;
+	});
+}
+
+void Player::Attack() {
+	if (fireTimer_ > 0) {
+		--fireTimer_;
+	}
+
+	// SPACE を押している間、一定間隔で連射
+	if (!Input::GetInstance()->PushKey(DIK_SPACE) || fireTimer_ > 0 || !modelBullet_) {
+		return;
+	}
+	fireTimer_ = kFireInterval;
+
+	// 向いている方向（入力方向）に飛ばす。モデルの正面は +Z
+	Vector3 velocity = {std::sin(targetRotationY_) * kBulletSpeed, 0.0f, std::cos(targetRotationY_) * kBulletSpeed};
+
+	PlayerBullet* newBullet = new PlayerBullet();
+	newBullet->Initialize(modelBullet_, camera_, mapChipField_, worldTransform_.translation_, velocity);
+	bullets_.push_back(newBullet);
+}
+
+Player::~Player() {
+	for (PlayerBullet* bullet : bullets_) {
+		delete bullet;
+	}
+	bullets_.clear();
 }
 
 void Player::Move() {
@@ -351,4 +394,11 @@ void Player::OnCollision(const Enemy* enemy) {
 	isDead_ = true;
 }
 
-void Player::Draw() { model_->Draw(worldTransform_, *camera_); }
+void Player::Draw() {
+	model_->Draw(worldTransform_, *camera_);
+
+	// 弾の描画
+	for (PlayerBullet* bullet : bullets_) {
+		bullet->Draw();
+	}
+}

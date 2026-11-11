@@ -9,6 +9,8 @@ void GameScene::Initialize() {
 	modelFloor_ = Model::CreateFromOBJ("cube", true);
 	modelSkydome_ = Model::CreateFromOBJ("skydome", true);
 	modelDeathParticle_ = Model::CreateFromOBJ("deathParticle", true);
+	// 弾のモデル（小さな立方体のdeathParticleモデルを流用）
+	modelBullet_ = Model::CreateFromOBJ("deathParticle", true);
 
 	// カメラの初期化は CameraController::Initialize で行う
 	debugCamera_ = new DebugCamera(1280, 720);
@@ -25,13 +27,10 @@ void GameScene::Initialize() {
 	player_ = new Player();
 	player_->Initialize(model_, &camera_, mapChipField_, playerInitialPosition);
 	player_->SetMapChipField(mapChipField_);
+	player_->SetBulletModel(modelBullet_);
 
 	// 敵の配置（CSVの列, 行）
-	const MapChipField::IndexSet enemyIndices[] = {
-	    {5,  4 },
-        {20, 9 },
-        {8,  20}
-    };
+	const MapChipField::IndexSet enemyIndices[] = {{5, 4}, {20, 9}, {8, 20}};
 	for (const MapChipField::IndexSet& index : enemyIndices) {
 		Enemy* newEnemy = new Enemy();
 		Vector3 enemyPosition = mapChipField_->GetMapChipPositionByIndex(index.x, index.y);
@@ -186,6 +185,15 @@ void GameScene::UpdatePlayPhase() {
 
 	// 全ての当たり判定
 	CheckAllCollisions();
+
+	// 倒された敵を削除
+	enemies_.remove_if([](Enemy* enemy) {
+		if (enemy->IsDead()) {
+			delete enemy;
+			return true;
+		}
+		return false;
+	});
 }
 
 // デス演出フェーズの処理
@@ -351,6 +359,28 @@ void GameScene::CheckAllCollisions() {
 		}
 	}
 #pragma endregion
+
+#pragma region 自弾と敵キャラの当たり判定
+	for (PlayerBullet* bullet : player_->GetBullets()) {
+		if (bullet->IsDead()) {
+			continue;
+		}
+		AABB aabbBullet = bullet->GetAABB();
+
+		for (Enemy* enemy : enemies_) {
+			if (enemy->IsDead()) {
+				continue;
+			}
+			if (calc::IsCollision(aabbBullet, enemy->GetAABB())) {
+				// 弾は消え、敵は倒される
+				bullet->OnCollision();
+				enemy->OnBulletCollision();
+				// 1発の弾で倒せるのは1体だけ
+				break;
+			}
+		}
+	}
+#pragma endregion
 }
 
 GameScene::~GameScene() {
@@ -378,6 +408,7 @@ GameScene::~GameScene() {
 	}
 	worldTransformFloors_.clear();
 	delete modelFloor_;
+	delete modelBullet_;
 	delete debugCamera_;
 
 	if (fade_) {
