@@ -27,7 +27,8 @@ private:
 	KamataEngine::Camera* camera_ = nullptr;
 	Player* target_ = nullptr;
 
-	KamataEngine::Vector3 targetOffset_ = {0.0f, 0.0f, -15.0f};
+	// 斜め見下ろし用のオフセット（上に15、手前に15）
+	KamataEngine::Vector3 targetOffset_ = {0.0f, 15.0f, -10.0f};
 
 	Rect movableArea_ = {0.0f, 100.0f, 0.0f, 100.0f};
 

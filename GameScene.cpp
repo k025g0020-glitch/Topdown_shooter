@@ -6,10 +6,11 @@ void GameScene::Initialize() {
 	model_ = Model::CreateFromOBJ("player", true);
 	modelEnemy_ = Model::CreateFromOBJ("enemy", true);
 	modelBlock_ = Model::CreateFromOBJ("block", true);
+	modelFloor_ = Model::CreateFromOBJ("cube", true);
 	modelSkydome_ = Model::CreateFromOBJ("skydome", true);
 	modelDeathParticle_ = Model::CreateFromOBJ("deathParticle", true);
 
-	camera_.Initialize();
+	// カメラの初期化は CameraController::Initialize で行う
 	debugCamera_ = new DebugCamera(1280, 720);
 
 	skydome_ = new Skydome();
@@ -18,15 +19,22 @@ void GameScene::Initialize() {
 	mapChipField_ = new MapChipField;
 	mapChipField_->LoadMapChipCsv("Resources/blocks.csv");
 
-	Vector3 playerInitialPosition = mapChipField_->GetMapChipPositionByIndex(2, 18);
+	// ステージ中央付近からスタート
+	Vector3 playerInitialPosition = mapChipField_->GetMapChipPositionByIndex(15, 24);
 
 	player_ = new Player();
 	player_->Initialize(model_, &camera_, mapChipField_, playerInitialPosition);
 	player_->SetMapChipField(mapChipField_);
 
-	for (int32_t i = 0; i < 3; ++i) {
+	// 敵の配置（CSVの列, 行）
+	const MapChipField::IndexSet enemyIndices[] = {
+	    {5,  4 },
+        {20, 9 },
+        {8,  20}
+    };
+	for (const MapChipField::IndexSet& index : enemyIndices) {
 		Enemy* newEnemy = new Enemy();
-		Vector3 enemyPosition = mapChipField_->GetMapChipPositionByIndex(10 + i * 2, 18);
+		Vector3 enemyPosition = mapChipField_->GetMapChipPositionByIndex(index.x, index.y);
 		newEnemy->Initialize(modelEnemy_, &camera_, mapChipField_, enemyPosition);
 		enemies_.push_back(newEnemy);
 	}
@@ -36,22 +44,16 @@ void GameScene::Initialize() {
 	cameraController_ = new CameraController();
 	cameraController_->Initialize(&camera_);
 	cameraController_->SetTarget(player_);
-	Rect area = {0.0f, 100.0f, 0.0f, 100.0f};
+	// カメラの移動可能範囲（X: 左右, Z: 手前～奥）。カメラは自キャラより15手前にいる点に注意
+	Rect area = {0.0f, 29.0f, -16.0f, 14.0f};
 	cameraController_->SetMovableArea(area);
 	cameraController_->Reset();
 
 	GenerateBlocks();
+	GenerateFloor();
 
-	// 生成した直後にブロックのワールド行列を計算＆定数バッファへ転送しておく
-	for (std::vector<WorldTransform*>& worldTransformBlockLine : worldTransformBlocks_) {
-		for (WorldTransform* worldTransformBlock : worldTransformBlockLine) {
-			if (!worldTransformBlock)
-				continue;
-			Matrix4x4 affineMatrix = calc::MakeAffineMatrix(worldTransformBlock->scale_, worldTransformBlock->rotation_, worldTransformBlock->translation_);
-			worldTransformBlock->matWorld_ = affineMatrix;
-			worldTransformBlock->TransferMatrix();
-		}
-	}
+	// 生成した直後にステージのワールド行列を計算＆定数バッファへ転送しておく
+	UpdateStage();
 
 	// カメラの初期状態を行列に反映
 	cameraController_->Update();
@@ -179,16 +181,8 @@ void GameScene::UpdatePlayPhase() {
 		camera_.TransferMatrix();
 	}
 
-	// ブロックの更新
-	for (std::vector<WorldTransform*>& worldTransformBlockLine : worldTransformBlocks_) {
-		for (WorldTransform* worldTransformBlock : worldTransformBlockLine) {
-			if (!worldTransformBlock)
-				continue;
-			Matrix4x4 affineMatrix = calc::MakeAffineMatrix(worldTransformBlock->scale_, worldTransformBlock->rotation_, worldTransformBlock->translation_);
-			worldTransformBlock->matWorld_ = affineMatrix;
-			worldTransformBlock->TransferMatrix();
-		}
-	}
+	// ステージの更新
+	UpdateStage();
 
 	// 全ての当たり判定
 	CheckAllCollisions();
@@ -225,16 +219,8 @@ void GameScene::UpdateDeathPhase() {
 		camera_.TransferMatrix();
 	}
 
-	// ブロックの更新
-	for (std::vector<WorldTransform*>& worldTransformBlockLine : worldTransformBlocks_) {
-		for (WorldTransform* worldTransformBlock : worldTransformBlockLine) {
-			if (!worldTransformBlock)
-				continue;
-			Matrix4x4 affineMatrix = calc::MakeAffineMatrix(worldTransformBlock->scale_, worldTransformBlock->rotation_, worldTransformBlock->translation_);
-			worldTransformBlock->matWorld_ = affineMatrix;
-			worldTransformBlock->TransferMatrix();
-		}
-	}
+	// ステージの更新
+	UpdateStage();
 }
 
 void GameScene::Draw() {
@@ -253,6 +239,12 @@ void GameScene::Draw() {
 		deathParticles_->Draw();
 	}
 
+	// 床の描画
+	for (WorldTransform* worldTransformFloor : worldTransformFloors_) {
+		modelFloor_->Draw(*worldTransformFloor, camera_);
+	}
+
+	// 壁ブロックの描画
 	for (std::vector<WorldTransform*>& worldTransformBlockLine : worldTransformBlocks_) {
 		for (WorldTransform* worldTransformBlock : worldTransformBlockLine) {
 			if (!worldTransformBlock)
@@ -288,13 +280,49 @@ void GameScene::GenerateBlocks() {
 				worldTransform->Initialize();
 
 				worldTransformBlocks_[i][j] = worldTransform;
-				// 座標をマップチップから取得して設定
+				// 座標をマップチップから取得して設定（底面を床の高さに合わせる）
 				worldTransformBlocks_[i][j]->translation_ = mapChipField_->GetMapChipPositionByIndex(j, i);
+				worldTransformBlocks_[i][j]->translation_.y = kBlockY;
 			} else {
 				// 空きマスには nullptr を入れる
 				worldTransformBlocks_[i][j] = nullptr;
 			}
 		}
+	}
+}
+
+void GameScene::GenerateFloor() {
+	uint32_t numBlockVertical = mapChipField_->GetNumBlockVirtical();
+	uint32_t numBlockHorizontal = mapChipField_->GetNumBlockHorizontal();
+
+	// 全マスに床タイルを敷く
+	for (uint32_t i = 0; i < numBlockVertical; ++i) {
+		for (uint32_t j = 0; j < numBlockHorizontal; ++j) {
+			WorldTransform* worldTransform = new WorldTransform();
+			worldTransform->Initialize();
+			// cubeモデルは一辺2なので、0.5倍で1マス分のサイズにする
+			worldTransform->scale_ = {0.5f, 0.5f, 0.5f};
+			worldTransform->translation_ = mapChipField_->GetMapChipPositionByIndex(j, i);
+			worldTransform->translation_.y = kFloorY;
+			worldTransformFloors_.push_back(worldTransform);
+		}
+	}
+}
+
+void GameScene::UpdateStage() {
+	// 壁ブロック
+	for (std::vector<WorldTransform*>& worldTransformBlockLine : worldTransformBlocks_) {
+		for (WorldTransform* worldTransformBlock : worldTransformBlockLine) {
+			if (!worldTransformBlock)
+				continue;
+			worldTransformBlock->matWorld_ = calc::MakeAffineMatrix(worldTransformBlock->scale_, worldTransformBlock->rotation_, worldTransformBlock->translation_);
+			worldTransformBlock->TransferMatrix();
+		}
+	}
+	// 床
+	for (WorldTransform* worldTransformFloor : worldTransformFloors_) {
+		worldTransformFloor->matWorld_ = calc::MakeAffineMatrix(worldTransformFloor->scale_, worldTransformFloor->rotation_, worldTransformFloor->translation_);
+		worldTransformFloor->TransferMatrix();
 	}
 }
 
@@ -345,6 +373,11 @@ GameScene::~GameScene() {
 		}
 	}
 	worldTransformBlocks_.clear();
+	for (WorldTransform* worldTransformFloor : worldTransformFloors_) {
+		delete worldTransformFloor;
+	}
+	worldTransformFloors_.clear();
+	delete modelFloor_;
 	delete debugCamera_;
 
 	if (fade_) {
