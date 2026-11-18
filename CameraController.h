@@ -27,7 +27,8 @@ private:
 	KamataEngine::Camera* camera_ = nullptr;
 	Player* target_ = nullptr;
 
-	KamataEngine::Vector3 targetOffset_ = {0.0f, 0.0f, -15.0f};
+	// 斜め見下ろし用のオフセット（上に20、手前に15）
+	KamataEngine::Vector3 targetOffset_ = {0.0f, 15.0f, -10.0f};
 
 	Rect movableArea_ = {0.0f, 100.0f, 0.0f, 100.0f};
 
@@ -36,6 +37,8 @@ private:
 	static inline const float kInterpolationRate = 0.1f;
 
 	static inline const float kVelocityBias = 10.0f;
+	// 先読みの最大距離（前転などで一気に動いたときにカメラが飛び出さないように）
+	static inline const float kMaxLookAhead = 2.0f;
 
 	static inline const Rect kMargin = {-3.0f, 3.0f, -2.0f, 2.0f};
 };

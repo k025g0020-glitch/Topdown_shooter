@@ -1,11 +1,10 @@
 #pragma once
 #include "KamataEngine.h"
 
+// 見下ろし型（XZ平面）用のマップ衝突情報
 struct CollisionMapInfo {
-	bool ceilingCollision = false; // 天井衝突フラグ
-	bool landing = false;          // 着地フラグ
-	bool wallCollision = false;    // 壁接触フラグ
-	bool hitWall = false;
+	bool hitWallX = false;           // X方向（左右）の壁に接触
+	bool hitWallZ = false;           // Z方向（奥・手前）の壁に接触
 	KamataEngine::Vector3 move = {}; // 移動量
 };
 
