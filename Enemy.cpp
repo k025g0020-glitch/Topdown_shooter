@@ -5,36 +5,70 @@
 #include <numbers>
 
 #include "Enemy.h"
+#include "EnemyBullet.h"
 #include "Player.h"
 #include "MapChipField.h"
 #include "calc.h"
 
 using namespace KamataEngine;
 
-void Enemy::Initialize(Model* model, Camera* camera, MapChipField* mapChipField, const Vector3& position) {
+Enemy::Param Enemy::GetParam(Type type) {
+	switch (type) {
+	case Type::kShooter:
+		// 遠距離型：紫色。足は遅めで、距離をとって弾を撃つ
+		return {30, 10, 0.07f, 11.0f, 1.0f, 0.8f, {0.8f, 0.4f, 1.0f, 1.0f}};
+	case Type::kSwarm:
+		// 群れ型：小さい緑色。HPは通常弾1発分、足が速い
+		return {10, 8, 0.15f, 10.0f, 0.6f, 0.5f, {0.5f, 1.0f, 0.5f, 1.0f}};
+	case Type::kBoss:
+		// ボス：大きく赤い。HPが多く、接触ダメージも大きい
+		return {1000, 30, 0.05f, 0.0f, 3.0f, 2.4f, {1.0f, 0.45f, 0.45f, 1.0f}};
+	case Type::kChaser:
+	default:
+		// 近接型：通常色。気づいたら追いかけてくる
+		return {30, 20, 0.11f, 9.0f, 1.0f, 0.8f, {1.0f, 1.0f, 1.0f, 1.0f}};
+	}
+}
+
+void Enemy::Initialize(Model* model, Camera* camera, MapChipField* mapChipField, const Vector3& position, Type type) {
 	assert(model);
 	assert(mapChipField);
 
 	model_ = model;
 	camera_ = camera;
+	mapChipField_ = mapChipField;
+
+	type_ = type;
+	param_ = GetParam(type);
+	hp_ = param_.maxHp;
+	width_ = param_.width;
+	height_ = kHeight * param_.scale;
 
 	worldTransform_.Initialize();
 	worldTransform_.translation_ = position;
-	mapChipField_ = mapChipField;
+	worldTransform_.scale_ = {param_.scale, param_.scale, param_.scale};
+	// 小さい敵が宙に浮かないよう、足元を床に合わせる（等倍のとき足元は y = -0.4）
+	worldTransform_.translation_.y = -0.4f * (1.0f - param_.scale);
 
-	// 右(+X)向き
-	worldTransform_.rotation_.y = std::numbers::pi_v<float> / 2.0f;
-	lrDirection_ = LRDirection::kRight;
+	// 手前(-Z)向き（カメラの方を向く）
+	worldTransform_.rotation_.y = std::numbers::pi_v<float>;
+	targetRotationY_ = worldTransform_.rotation_.y;
 
-	turnFirstRotationY_ = worldTransform_.rotation_.y;
-	turnTimer_ = 0.0f;
+	// 歩行アニメーションがそろわないよう、開始タイミングをずらす
+	walkTimer_ = position.x * 0.37f + position.z * 0.11f;
 
-	walkTimer_ = 0.0f;
+	hitTimer_ = 0;
+	isAggro_ = false;
+	// 撃つタイミングも敵ごとにずらす
+	shootTimer_ = kShootInterval / 2 + static_cast<int32_t>(position.x * 7.0f) % kShootInterval;
+
+	objectColor_.Initialize();
+	objectColor_.SetColor(param_.color);
 }
 
 void Enemy::Update() {
-	// 自動移動の処理
-	Move();
+	// 種類ごとの行動
+	Think();
 
 	// 衝突情報を初期化
 	CollisionMapInfo collisionMapInfo;
@@ -42,69 +76,223 @@ void Enemy::Update() {
 
 	// マップとの衝突判定
 	MapCollision(collisionMapInfo);
-
-	// 旋回制御
-	if (turnTimer_ > 0.0f) {
-		turnTimer_ -= 1.0f / 60.0f;
-		if (turnTimer_ < 0.0f) {
-			turnTimer_ = 0.0f;
-		}
-
-		float destinationRotationYTable[] = {std::numbers::pi_v<float> / 2.0f, std::numbers::pi_v<float> * 3.0f / 2.0f};
-		float destinationRotationY = destinationRotationYTable[static_cast<uint32_t>(lrDirection_)];
-
-		float ratio = 1.0f - (turnTimer_ / kTimeTurn);
-		worldTransform_.rotation_.y = std::lerp(turnFirstRotationY_, destinationRotationY, ratio);
-	}
+	lastHitWall_ = collisionMapInfo.hitWallX || collisionMapInfo.hitWallZ;
+	++animFrame_;
 
 	// 衝突応答
 	OnWallCollision(collisionMapInfo);
 
-	// 左右の壁にヒットした場合は進行方向を反転させる自動巡回AI
-	if (collisionMapInfo.hitWallX) {
-		if (lrDirection_ == LRDirection::kRight) {
-			lrDirection_ = LRDirection::kLeft;
-		} else {
-			lrDirection_ = LRDirection::kRight;
-		}
-		turnFirstRotationY_ = worldTransform_.rotation_.y;
-		turnTimer_ = kTimeTurn;
-		velocity_.x = 0.0f; // 反転時に一度速度をリセット
-	}
-
 	// 判定結果を反映して移動
 	ApplyMove(collisionMapInfo);
 
-	// 歩行アニメーション（X軸周りに前後に揺らす）
-	walkTimer_ += 1.0f / 60.0f;
-	float sinParam = std::sin(2.0f * std::numbers::pi_v<float> * walkTimer_);
-	float ratio = (sinParam + 1.0f) / 2.0f;
-	float degree = -kWalkMotionAngleStart + (kWalkMotionAngleStart + kWalkMotionAngleEnd) * ratio;
-	worldTransform_.rotation_.x = degree * (std::numbers::pi_v<float> / 180.0f);
+	// 旋回（最短方向に回る）
+	float diff = std::remainder(targetRotationY_ - worldTransform_.rotation_.y, 2.0f * std::numbers::pi_v<float>);
+	worldTransform_.rotation_.y += diff * kTurnRate;
+
+	// 歩行アニメーション（動いている間だけX軸周りに前後に揺らす）
+	float speed = std::sqrt(velocity_.x * velocity_.x + velocity_.z * velocity_.z);
+	if (speed > 0.01f) {
+		walkTimer_ += 1.0f / 60.0f * (speed / 0.1f);
+		float sinParam = std::sin(2.0f * std::numbers::pi_v<float> * walkTimer_);
+		float ratio = (sinParam + 1.0f) / 2.0f;
+		float degree = -kWalkMotionAngleStart + (kWalkMotionAngleStart + kWalkMotionAngleEnd) * ratio;
+		worldTransform_.rotation_.x = degree * (std::numbers::pi_v<float> / 180.0f);
+	} else {
+		worldTransform_.rotation_.x *= 0.8f;
+	}
+
+	// 通常時の色（ハイライト中は黄色っぽく明るくする）
+	Vector4 baseColor = isHighlighted_ ? Vector4{1.0f, 1.0f, 0.4f, 1.0f} : param_.color;
+
+	// 攻撃の溜め中は白く点滅して膨らむ（攻撃してくる合図）
+	float chargeScale = 1.0f;
+	float chargeRatio = GetChargeRatio();
+	if (chargeRatio >= 0.0f) {
+		chargeScale = 1.0f + (type_ == Type::kBoss ? 0.15f : 0.25f) * chargeRatio;
+		if ((animFrame_ / 3) % 2 == 0) {
+			baseColor = {1.0f, 1.0f, 1.0f, 1.0f};
+		}
+	}
+
+	if (type_ == Type::kBoss) {
+		// 目を覚ます演出：脈打つように大きさが変わる
+		if (bossState_ == BossState::kWake) {
+			chargeScale = 1.0f + 0.1f * std::sin(static_cast<float>(animFrame_) * 0.5f);
+		}
+		// 突進後のすき：暗くなって動きが止まる（攻撃のチャンス）
+		if (bossState_ == BossState::kStun) {
+			baseColor = {baseColor.x * 0.5f, baseColor.y * 0.5f, baseColor.z * 0.5f, 1.0f};
+		}
+	}
+
+	// 被弾演出
+	float hitScale = 1.0f;
+	if (hitTimer_ > 0) {
+		--hitTimer_;
+		// 経過割合 1.0（被弾直後）→ 0.0（演出終了）
+		float t = static_cast<float>(hitTimer_) / static_cast<float>(kHitFlashTime);
+		// 一瞬膨らんで元の大きさに戻る
+		float maxHitScale = (type_ == Type::kBoss) ? kBossHitScale : kHitScale;
+		hitScale = 1.0f + (maxHitScale - 1.0f) * t;
+		// 2フレームごとに赤と通常色を切り替えて点滅
+		if ((hitTimer_ / 2) % 2 == 0) {
+			baseColor = {1.0f, 0.2f, 0.2f, 1.0f};
+		}
+	}
+	objectColor_.SetColor(baseColor);
+	float scale = param_.scale * chargeScale * hitScale;
+	worldTransform_.scale_ = {scale, scale, scale};
 
 	// 行列更新
 	worldTransform_.matWorld_ = calc::MakeAffineMatrix(worldTransform_.scale_, worldTransform_.rotation_, worldTransform_.translation_);
 	worldTransform_.TransferMatrix();
 }
 
-void Enemy::Move() {
-	// 現在の進行方向に向かって加速する自動移動（XZ平面上をX方向に往復）
-	if (lrDirection_ == LRDirection::kRight) {
-		velocity_.x += kAcceleration;
-	} else {
-		velocity_.x -= kAcceleration;
+void Enemy::Think() {
+	// ボスは専用の行動
+	if (type_ == Type::kBoss) {
+		ThinkBoss();
+		return;
 	}
-	velocity_.x = std::clamp(velocity_.x, -kLimitRunSpeed, kLimitRunSpeed);
+
+	Vector3 desiredVelocity = {};
+
+	if (player_ && !player_->IsDead()) {
+		// 自キャラへのベクトル（XZ平面）
+		Vector3 toPlayer = calc::Subtract(player_->GetTranslation(), worldTransform_.translation_);
+		toPlayer.y = 0.0f;
+		float distance = calc::Length(toPlayer);
+		Vector3 dirToPlayer = (distance > 0.001f) ? calc::Multiply(1.0f / distance, toPlayer) : Vector3{};
+
+		// 一定距離まで近づいたら気づく（集団の仲間にも知らせる）
+		if (!isAggro_ && distance <= param_.detectRange) {
+			BecomeAggro();
+		}
+
+		if (isAggro_) {
+			switch (type_) {
+			case Type::kChaser:
+			case Type::kSwarm:
+				// まっすぐ追いかける
+				desiredVelocity = calc::Multiply(param_.speed, dirToPlayer);
+				break;
+
+			case Type::kBoss:
+				break;
+
+			case Type::kShooter:
+				// 近すぎたら離れ、遠すぎたら近づく。ちょうどいい距離ならその場で止まる
+				if (distance < kShooterNearDistance) {
+					desiredVelocity = calc::Multiply(-param_.speed, dirToPlayer);
+				} else if (distance > kShooterFarDistance) {
+					desiredVelocity = calc::Multiply(param_.speed, dirToPlayer);
+				}
+				UpdateShoot(distance);
+				// 溜め中は止まる
+				if (shootTimer_ <= kShootChargeTime) {
+					desiredVelocity = {};
+				}
+				break;
+			}
+
+			// 自キャラの方を向く
+			targetRotationY_ = std::atan2(dirToPlayer.x, dirToPlayer.z);
+		}
+	}
+
+	// 仲間と重ならないように離れる
+	desiredVelocity = calc::Add(desiredVelocity, CalcSeparation());
+
+	// 目標速度へなめらかに近づける
+	velocity_ = calc::Lerp(velocity_, desiredVelocity, kAccelRate);
 	velocity_.y = 0.0f;
-	velocity_.z = 0.0f;
+}
+
+void Enemy::UpdateShoot(float distanceToPlayer) {
+	if (--shootTimer_ > 0) {
+		return;
+	}
+	shootTimer_ = kShootInterval;
+
+	// 遠すぎる（画面外）ときは撃たない
+	if (distanceToPlayer > param_.detectRange * 1.5f || !enemyBullets_ || !modelBullet_) {
+		return;
+	}
+
+	// 撃つ瞬間の自キャラの位置へ向けて撃つ
+	Vector3 toPlayer = calc::Subtract(player_->GetTranslation(), worldTransform_.translation_);
+	toPlayer.y = 0.0f;
+	FireBullet(calc::Normalize(toPlayer), kEnemyBulletSpeed);
+}
+
+void Enemy::FireBullet(const Vector3& direction, float speed) {
+	if (!enemyBullets_ || !modelBullet_) {
+		return;
+	}
+	// 弾は自キャラと同じ高さ(y = 0)を飛ばす
+	Vector3 position = worldTransform_.translation_;
+	position.y = 0.0f;
+
+	EnemyBullet* bullet = new EnemyBullet();
+	bullet->Initialize(modelBullet_, camera_, mapChipField_, position, calc::Multiply(speed, direction));
+	enemyBullets_->push_back(bullet);
+}
+
+float Enemy::GetChargeRatio() const {
+	if (type_ == Type::kShooter && isAggro_ && shootTimer_ <= kShootChargeTime) {
+		return 1.0f - static_cast<float>(shootTimer_) / static_cast<float>(kShootChargeTime);
+	}
+	if (type_ == Type::kBoss && bossState_ == BossState::kCharge) {
+		return 1.0f - static_cast<float>(bossTimer_) / static_cast<float>(bossChargeDuration_);
+	}
+	return -1.0f;
+}
+
+void Enemy::BecomeAggro() {
+	isAggro_ = true;
+
+	// 集団に属していなければ自分だけ
+	if (groupId_ < 0 || !enemies_) {
+		return;
+	}
+
+	// 同じ集団の仲間も一斉に気づく
+	for (Enemy* other : *enemies_) {
+		if (other != this && other->groupId_ == groupId_) {
+			other->isAggro_ = true;
+		}
+	}
+}
+
+Vector3 Enemy::CalcSeparation() const {
+	Vector3 push = {};
+	// ボスは押されない
+	if (!enemies_ || type_ == Type::kBoss) {
+		return push;
+	}
+	for (const Enemy* other : *enemies_) {
+		if (other == this || other->IsDead()) {
+			continue;
+		}
+		Vector3 away = calc::Subtract(worldTransform_.translation_, other->worldTransform_.translation_);
+		away.y = 0.0f;
+		float distance = calc::Length(away);
+		// 近いほど強く押し離す
+		float radius = (width_ + other->width_) / 2.0f + 0.1f;
+		radius = std::max(radius, kSeparationRadius * std::min(param_.scale, other->param_.scale));
+		if (distance > 0.0001f && distance < radius) {
+			push = calc::Add(push, calc::Multiply(kSeparationPower * (1.0f - distance / radius) / distance, away));
+		}
+	}
+	return push;
 }
 
 Vector3 Enemy::CornerPosition(const Vector3& center, Corner corner) {
 	Vector3 offsetTable[kNumCorner] = {
-	    {+kWidth / 2.0f, 0.0f, -kWidth / 2.0f}, // kRightNear
-	    {-kWidth / 2.0f, 0.0f, -kWidth / 2.0f}, // kLeftNear
-	    {+kWidth / 2.0f, 0.0f, +kWidth / 2.0f}, // kRightFar
-	    {-kWidth / 2.0f, 0.0f, +kWidth / 2.0f}, // kLeftFar
+	    {+width_ / 2.0f, 0.0f, -width_ / 2.0f}, // kRightNear
+	    {-width_ / 2.0f, 0.0f, -width_ / 2.0f}, // kLeftNear
+	    {+width_ / 2.0f, 0.0f, +width_ / 2.0f}, // kRightFar
+	    {-width_ / 2.0f, 0.0f, +width_ / 2.0f}, // kLeftFar
 	};
 
 	const Vector3& offset = offsetTable[static_cast<uint32_t>(corner)];
@@ -154,12 +342,12 @@ void Enemy::MapCollisionFar(CollisionMapInfo& info) {
 
 	if (hit) {
 		const Vector3& pos = worldTransform_.translation_;
-		MapChipField::IndexSet indexSetNow = mapChipField_->GetMapChipIndexByPosition({pos.x, 0.0f, pos.z + kWidth / 2.0f});
-		indexSet = mapChipField_->GetMapChipIndexByPosition({pos.x, 0.0f, pos.z + info.move.z + kWidth / 2.0f});
+		MapChipField::IndexSet indexSetNow = mapChipField_->GetMapChipIndexByPosition({pos.x, 0.0f, pos.z + width_ / 2.0f});
+		indexSet = mapChipField_->GetMapChipIndexByPosition({pos.x, 0.0f, pos.z + info.move.z + width_ / 2.0f});
 
 		if (indexSetNow.y != indexSet.y) {
 			MapChipField::Rect rect = mapChipField_->GetRectByIndex(indexSet.x, indexSet.y);
-			float moveZ = rect.bottom - pos.z - (kWidth / 2.0f + kBlank);
+			float moveZ = rect.bottom - pos.z - (width_ / 2.0f + kBlank);
 			info.move.z = std::max(0.0f, moveZ);
 			info.hitWallZ = true;
 		}
@@ -200,12 +388,12 @@ void Enemy::MapCollisionNear(CollisionMapInfo& info) {
 
 	if (hit) {
 		const Vector3& pos = worldTransform_.translation_;
-		MapChipField::IndexSet indexSetNow = mapChipField_->GetMapChipIndexByPosition({pos.x, 0.0f, pos.z - kWidth / 2.0f});
-		indexSet = mapChipField_->GetMapChipIndexByPosition({pos.x, 0.0f, pos.z + info.move.z - kWidth / 2.0f});
+		MapChipField::IndexSet indexSetNow = mapChipField_->GetMapChipIndexByPosition({pos.x, 0.0f, pos.z - width_ / 2.0f});
+		indexSet = mapChipField_->GetMapChipIndexByPosition({pos.x, 0.0f, pos.z + info.move.z - width_ / 2.0f});
 
 		if (indexSetNow.y != indexSet.y) {
 			MapChipField::Rect rect = mapChipField_->GetRectByIndex(indexSet.x, indexSet.y);
-			float moveZ = rect.top + (kWidth / 2.0f + kBlank) - pos.z;
+			float moveZ = rect.top + (width_ / 2.0f + kBlank) - pos.z;
 			info.move.z = std::min(0.0f, moveZ);
 			info.hitWallZ = true;
 		}
@@ -246,12 +434,12 @@ void Enemy::MapCollisionRight(CollisionMapInfo& info) {
 
 	if (hit) {
 		const Vector3& pos = worldTransform_.translation_;
-		MapChipField::IndexSet indexSetNow = mapChipField_->GetMapChipIndexByPosition({pos.x + kWidth / 2.0f, 0.0f, pos.z});
-		indexSet = mapChipField_->GetMapChipIndexByPosition({pos.x + info.move.x + kWidth / 2.0f, 0.0f, pos.z + info.move.z});
+		MapChipField::IndexSet indexSetNow = mapChipField_->GetMapChipIndexByPosition({pos.x + width_ / 2.0f, 0.0f, pos.z});
+		indexSet = mapChipField_->GetMapChipIndexByPosition({pos.x + info.move.x + width_ / 2.0f, 0.0f, pos.z + info.move.z});
 
 		if (indexSetNow.x != indexSet.x) {
 			MapChipField::Rect rect = mapChipField_->GetRectByIndex(indexSet.x, indexSet.y);
-			float moveX = rect.left - (kWidth / 2.0f) - kBlank - pos.x;
+			float moveX = rect.left - (width_ / 2.0f) - kBlank - pos.x;
 			info.move.x = std::max(0.0f, moveX);
 			info.hitWallX = true;
 		}
@@ -292,12 +480,12 @@ void Enemy::MapCollisionLeft(CollisionMapInfo& info) {
 
 	if (hit) {
 		const Vector3& pos = worldTransform_.translation_;
-		MapChipField::IndexSet indexSetNow = mapChipField_->GetMapChipIndexByPosition({pos.x - kWidth / 2.0f, 0.0f, pos.z});
-		indexSet = mapChipField_->GetMapChipIndexByPosition({pos.x + info.move.x - kWidth / 2.0f, 0.0f, pos.z + info.move.z});
+		MapChipField::IndexSet indexSetNow = mapChipField_->GetMapChipIndexByPosition({pos.x - width_ / 2.0f, 0.0f, pos.z});
+		indexSet = mapChipField_->GetMapChipIndexByPosition({pos.x + info.move.x - width_ / 2.0f, 0.0f, pos.z + info.move.z});
 
 		if (indexSetNow.x != indexSet.x) {
 			MapChipField::Rect rect = mapChipField_->GetRectByIndex(indexSet.x, indexSet.y);
-			float moveX = rect.right + (kWidth / 2.0f) + kBlank - pos.x;
+			float moveX = rect.right + (width_ / 2.0f) + kBlank - pos.x;
 			info.move.x = std::min(0.0f, moveX);
 			info.hitWallX = true;
 		}
@@ -321,7 +509,7 @@ void Enemy::OnWallCollision(const CollisionMapInfo& info) {
 }
 
 // --- ワールド座標の取得 ---
-Vector3 Enemy::GetWorldPosition() {
+Vector3 Enemy::GetWorldPosition() const {
 	Vector3 worldPos;
 	worldPos.x = worldTransform_.matWorld_.m[3][0];
 	worldPos.y = worldTransform_.matWorld_.m[3][1];
@@ -333,8 +521,8 @@ Vector3 Enemy::GetWorldPosition() {
 AABB Enemy::GetAABB() {
 	Vector3 worldPos = GetWorldPosition();
 	AABB aabb;
-	aabb.min = {worldPos.x - kWidth / 2.0f, worldPos.y - kHeight / 2.0f, worldPos.z - kWidth / 2.0f};
-	aabb.max = {worldPos.x + kWidth / 2.0f, worldPos.y + kHeight / 2.0f, worldPos.z + kWidth / 2.0f};
+	aabb.min = {worldPos.x - width_ / 2.0f, worldPos.y - height_ / 2.0f, worldPos.z - width_ / 2.0f};
+	aabb.max = {worldPos.x + width_ / 2.0f, worldPos.y + height_ / 2.0f, worldPos.z + width_ / 2.0f};
 	return aabb;
 }
 
@@ -343,11 +531,29 @@ void Enemy::OnCollision(const Player* player) {
 	(void)player;
 }
 
-void Enemy::OnBulletCollision() {
-	// 弾が当たったら倒される
-	isDead_ = true;
+void Enemy::TakeDamage(int32_t damage) {
+	if (isDead_) {
+		return;
+	}
+	// 眠っているボスはダメージを受けない（部屋の外から倒されないように）
+	if (type_ == Type::kBoss && bossState_ == BossState::kSleep) {
+		return;
+	}
+	// 攻撃されたら、遠くにいても自キャラに気づく（集団の仲間にも知らせる）
+	if (!isAggro_) {
+		BecomeAggro();
+	}
+	// HPを減らす
+	hp_ -= damage;
+	// 被弾演出を開始
+	hitTimer_ = kHitFlashTime;
+
+	// HPが0になったら倒される
+	if (hp_ <= 0) {
+		isDead_ = true;
+	}
 }
 
 void Enemy::Draw() {
-	model_->Draw(worldTransform_, *camera_);
+	model_->Draw(worldTransform_, *camera_, &objectColor_);
 }

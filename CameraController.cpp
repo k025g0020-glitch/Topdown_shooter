@@ -21,20 +21,24 @@ void CameraController::Reset() {
 void CameraController::Update() {
 	const WorldTransform& targetWorldTransform = target_->GetWorldTransform();
 
-	// 追従目標 = 自キャラ位置 + オフセット + 速度による先読み（XZ平面）
-	Vector3 targetVelocity = target_->GetVelocity();
+	// 追従目標 = 自キャラ位置 + オフセット + 移動方向への先読み（XZ平面）
+	// 先読みには「実際に動いた量」を使う。入力しているだけで壁に止められているときは先読みしない
+	Vector3 lookAhead = calc::Multiply(kVelocityBias, target_->GetMoveAmount());
+	lookAhead.y = 0.0f;
+	float lookAheadLength = calc::Length(lookAhead);
+	if (lookAheadLength > kMaxLookAhead) {
+		lookAhead = calc::Multiply(kMaxLookAhead / lookAheadLength, lookAhead);
+	}
 	targetPosition_ = calc::Add(targetWorldTransform.translation_, targetOffset_);
-	targetPosition_.x += targetVelocity.x * kVelocityBias;
-	targetPosition_.z += targetVelocity.z * kVelocityBias;
+	targetPosition_.x += lookAhead.x;
+	targetPosition_.z += lookAhead.z;
 
 	// 補間して滑らかに追従
 	camera_->translation_ = calc::Lerp(camera_->translation_, targetPosition_, kInterpolationRate);
 
 	// 自キャラが画面外に出ないようマージンで制限（X・Z）
-	camera_->translation_.x =
-	    std::clamp(camera_->translation_.x, targetWorldTransform.translation_.x + targetOffset_.x + kMargin.left, targetWorldTransform.translation_.x + targetOffset_.x + kMargin.right);
-	camera_->translation_.z =
-	    std::clamp(camera_->translation_.z, targetWorldTransform.translation_.z + targetOffset_.z + kMargin.bottom, targetWorldTransform.translation_.z + targetOffset_.z + kMargin.top);
+	camera_->translation_.x = std::clamp(camera_->translation_.x, targetWorldTransform.translation_.x + targetOffset_.x + kMargin.left, targetWorldTransform.translation_.x + targetOffset_.x + kMargin.right);
+	camera_->translation_.z = std::clamp(camera_->translation_.z, targetWorldTransform.translation_.z + targetOffset_.z + kMargin.bottom, targetWorldTransform.translation_.z + targetOffset_.z + kMargin.top);
 
 	// 移動可能範囲で制限（X・Z）
 	camera_->translation_.x = std::clamp(camera_->translation_.x, movableArea_.left, movableArea_.right);

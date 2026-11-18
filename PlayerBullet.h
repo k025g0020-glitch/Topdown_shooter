@@ -12,6 +12,7 @@ public:
 	void Draw();
 
 	bool IsDead() const { return isDead_; }
+	int32_t GetDamage() const { return kDamage; }
 
 	KamataEngine::Vector3 GetWorldPosition() const;
 	AABB GetAABB() const;
@@ -31,6 +32,9 @@ private:
 	// 寿命<フレーム>
 	static inline const int32_t kLifeTime = 60 * 2;
 	int32_t deathTimer_ = kLifeTime;
+
+	// 与えるダメージ
+	static inline const int32_t kDamage = 10;
 
 	// 当たり判定サイズ
 	static inline const float kSize = 0.4f;
